@@ -1,0 +1,343 @@
+#!/bin/zsh
+# reicon: set, restore and keep custom icons on macOS apps.
+#
+# Uses NSWorkspace.setIcon through JavaScript for Automation (osascript), so it
+# needs no Xcode, Command Line Tools or third-party dependency. This is the same
+# mechanism Finder uses when you paste an image into "Get Info": it writes an
+# "Icon\r" file inside the bundle and sets the custom-icon Finder flag.
+#
+# An app update replaces the bundle and drops that file. `reicon set` keeps a
+# copy of each image in the registry so `reicon sync` can put the icons back.
+
+set -euo pipefail
+
+readonly PROG=reicon
+readonly VERSION=0.1.0
+readonly ICON_FILE=$'Icon\r'
+
+# Under sudo, $HOME may be root's: always work on the invoking user's home.
+if [[ -n ${SUDO_USER-} ]]; then
+  readonly USER_HOME=${userdirs[$SUDO_USER]}
+else
+  readonly USER_HOME=$HOME
+fi
+
+readonly APP_DIRS=(/Applications "$USER_HOME/Applications")
+readonly CONFIG_DIR=${XDG_CONFIG_HOME:-$USER_HOME/.config}/reicon
+readonly ICONS_DIR=$CONFIG_DIR/icons
+# One line per managed app: "<app path>\t<stored image path>".
+readonly REGISTRY=$CONFIG_DIR/registry.tsv
+
+# --- help -------------------------------------------------------------------
+
+usage() {
+  cat <<EOF
+reicon $VERSION: custom icons for macOS apps
+
+Usage:
+  $PROG set <app> <image>    set <image> (png, jpg, icns, svg) as the icon of <app>
+  $PROG restore <app>        remove the custom icon and restore the original one
+  $PROG list                 show managed icons and other apps with a custom icon
+  $PROG sync                 re-apply managed icons dropped by app updates
+  $PROG help [command]       show help, or help for one command
+  $PROG --version            show the version
+
+<app> is a path to a .app bundle or just its name (OpenIDEA, "Visual Studio Code"),
+looked up in /Applications and ~/Applications.
+
+Examples:
+  $PROG set OpenIDEA ~/Downloads/openidea.png
+  $PROG sync
+EOF
+}
+
+usage_set() {
+  cat <<EOF
+Usage: $PROG set <app> <image>
+
+Sets <image> as the icon of <app>, refreshes Finder and the Dock, and stores a
+copy of the image so '$PROG sync' can re-apply it after the app updates.
+Use a square image, ideally 1024x1024 with the macOS icon shape already drawn.
+EOF
+}
+
+usage_restore() {
+  cat <<EOF
+Usage: $PROG restore <app>
+
+Removes the custom icon of <app> and forgets it, so '$PROG sync' leaves it alone.
+EOF
+}
+
+usage_list() {
+  cat <<EOF
+Usage: $PROG list
+
+Shows the icons managed by $PROG with their state:
+  ok            the custom icon is in place
+  needs sync    the app was updated and lost its icon: run '$PROG sync'
+  app missing   the app is no longer installed
+and the apps in ${APP_DIRS[*]} with a custom icon set outside $PROG.
+EOF
+}
+
+usage_sync() {
+  cat <<EOF
+Usage: $PROG sync
+
+Re-applies every managed icon that is no longer in place, typically after an
+app update. Apps that are no longer installed are skipped.
+EOF
+}
+
+# --- helpers ----------------------------------------------------------------
+
+warn() {
+  print -ru2 -- "$PROG: $*"
+}
+
+die() {
+  warn "$@"
+  exit 1
+}
+
+# Creates the config dirs as the invoking user, so sudo never leaves a
+# root-owned ~/.config behind.
+ensure_config_dirs() {
+  if [[ -n ${SUDO_USER-} ]]; then
+    sudo -u "$SUDO_USER" mkdir -p "$ICONS_DIR"
+  else
+    mkdir -p "$ICONS_DIR"
+  fi
+}
+
+# Files written under sudo would otherwise belong to root.
+fix_owner() {
+  [[ -n ${SUDO_USER-} && -e $CONFIG_DIR ]] && chown -R "$SUDO_USER" "$CONFIG_DIR"
+  return 0
+}
+
+# Accepts a bundle path or a bare app name and prints the canonical bundle path.
+# Canonical (:A) matters: APFS is case-insensitive, and the path is the registry key.
+resolve_app() {
+  local arg=$1
+  if [[ $arg == */* || $arg == *.app ]] && [[ -d $arg ]]; then
+    [[ ${arg:A} == *.app ]] || die "not an app bundle: $arg"
+    print -r -- ${arg:A}
+    return
+  fi
+  local name=${arg%.app} dir
+  for dir in $APP_DIRS; do
+    [[ -d $dir/$name.app ]] && { print -r -- ${${:-$dir/$name.app}:A}; return; }
+  done
+  die "app not found in ${APP_DIRS[*]}: $arg"
+}
+
+# Prints why <app> cannot be changed and returns 1, or returns 0.
+check_writable() {
+  local app=$1
+  if [[ $app == /System/* ]]; then
+    warn "system apps live on a read-only volume and cannot be changed: $app"
+    return 1
+  fi
+  if [[ ! -w $app ]]; then
+    warn "no write access to $app (owned by $(stat -f %Su "$app")). Run it again with sudo."
+    return 1
+  fi
+  return 0
+}
+
+has_custom_icon() {
+  [[ -e $1/$ICON_FILE ]]
+}
+
+# Calls NSWorkspace.setIcon(_:forFile:options:). An empty image path clears the
+# custom icon. Throwing inside JXA makes osascript exit non-zero; its message is
+# printed without the "execution error: Error:" prefix and "(-2700)" code it adds.
+apply_icon() {
+  local app=$1 image=$2 err
+  err=$(osascript -l JavaScript - "$app" "$image" 2>&1 >/dev/null <<'JXA'
+ObjC.import('AppKit');
+function run(argv) {
+  const [app, imagePath] = argv;
+  let image = $();
+  if (imagePath) {
+    image = $.NSImage.alloc.initWithContentsOfFile(imagePath);
+    if (image.isNil()) throw new Error('cannot read image: ' + imagePath);
+  }
+  if (!$.NSWorkspace.sharedWorkspace.setIconForFileOptions(image, app, 0)) {
+    throw new Error('macOS refused to change the icon of ' + app +
+      '. If the app is not yours, allow your terminal in System Settings > Privacy & Security > App Management.');
+  }
+}
+JXA
+  ) && return 0
+  warn "$(print -r -- "$err" | sed -E 's/^execution error: (Error: )*//; s/ \(-?[0-9]+\)$//')"
+  return 1
+}
+
+# Finder caches icons per bundle: bumping the mtime invalidates that cache.
+touch_app() {
+  touch "$1"
+}
+
+# The Dock keeps its own icon cache, reloaded only on restart.
+refresh_dock() {
+  killall Dock 2>/dev/null || true
+}
+
+bundle_id() {
+  /usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$1/Contents/Info.plist" 2>/dev/null \
+    || print -r -- ${1:t:r}
+}
+
+# Prints the registry without the line for <app>.
+registry_without() {
+  [[ -f $REGISTRY ]] || return 0
+  awk -F'\t' -v app="$1" '$1 != app' "$REGISTRY"
+}
+
+registry_image() {
+  [[ -f $REGISTRY ]] || return 0
+  awk -F'\t' -v app="$1" '$1 == app { print $2; exit }' "$REGISTRY"
+}
+
+# Atomic rewrite, so an interrupted run never leaves a half-written registry.
+registry_write() {
+  local content=$1 tmp
+  ensure_config_dirs
+  tmp=$(mktemp "$CONFIG_DIR/registry.XXXXXX")
+  [[ -n $content ]] && print -r -- "$content" >"$tmp"
+  mv "$tmp" "$REGISTRY"
+}
+
+# --- commands ---------------------------------------------------------------
+
+cmd_set() {
+  (( $# == 2 )) || { usage_set >&2; exit 1; }
+  local app image stored previous
+  app=$(resolve_app "$1")
+  image=${2:A}
+  [[ -f $image ]] || die "image not found: $2"
+  check_writable "$app" || exit 1
+
+  apply_icon "$app" "$image" || exit 1
+  touch_app "$app"
+  refresh_dock
+
+  ensure_config_dirs
+  stored=$ICONS_DIR/$(bundle_id "$app").${image:e:l}
+  # The previous copy may have another extension: drop it before storing the new one.
+  previous=$(registry_image "$app")
+  [[ -n $previous && $previous != "$stored" ]] && rm -f "$previous"
+  [[ $image != "$stored" ]] && cp "$image" "$stored"
+  registry_write "$(registry_without "$app"; print -r -- "$app"$'\t'"$stored")"
+  fix_owner
+
+  print -r -- "Set ${image:t} as the icon of ${app:t}"
+}
+
+cmd_restore() {
+  (( $# == 1 )) || { usage_restore >&2; exit 1; }
+  local app previous
+  app=$(resolve_app "$1")
+  check_writable "$app" || exit 1
+
+  apply_icon "$app" "" || exit 1
+  touch_app "$app"
+  refresh_dock
+
+  previous=$(registry_image "$app")
+  if [[ -n $previous ]]; then
+    rm -f "$previous"
+    registry_write "$(registry_without "$app")"
+    fix_owner
+  fi
+
+  print -r -- "Restored the original icon of ${app:t}"
+}
+
+cmd_list() {
+  (( $# == 0 )) || { usage_list >&2; exit 1; }
+  local -A managed
+  local app image state
+
+  if [[ -s $REGISTRY ]]; then
+    print -- "Managed by $PROG:"
+    while IFS=$'\t' read -r app image; do
+      managed[$app]=1
+      if [[ ! -d $app ]]; then state="app missing"
+      elif has_custom_icon "$app"; then state="ok"
+      else state="needs sync"
+      fi
+      printf '  %-12s %s\n' "$state" "$app"
+      # Older entries may differ in case from the real path: match both forms.
+      managed[${app:A}]=1
+    done <"$REGISTRY"
+  else
+    print -- "No icons managed by $PROG yet."
+  fi
+
+  local -a others=()
+  for app in ${^APP_DIRS}/*.app(N); do
+    (( ${+managed[$app]} )) && continue
+    has_custom_icon "$app" && others+=("$app")
+  done
+  if (( ${#others} )); then
+    print -- "\nCustom icon set outside $PROG:"
+    printf '  %s\n' "${others[@]}"
+  fi
+  return 0
+}
+
+cmd_sync() {
+  (( $# == 0 )) || { usage_sync >&2; exit 1; }
+  [[ -s $REGISTRY ]] || { print -- "No icons managed by $PROG yet."; return; }
+
+  # One failing app must not stop the others: count it and exit non-zero at the end.
+  local app image applied=0 skipped=0 failed=0
+  while IFS=$'\t' read -r app image; do
+    if [[ ! -d $app ]]; then
+      print -r -- "skip      $app (not installed)"
+      (( skipped += 1 ))
+    elif has_custom_icon "$app"; then
+      print -r -- "ok        $app"
+    elif [[ ! -f $image ]]; then
+      print -ru2 -- "failed    $app (stored image $image is gone, run '$PROG set' again)"
+      (( failed += 1 ))
+    elif check_writable "$app" && apply_icon "$app" "$image"; then
+      touch_app "$app"
+      print -r -- "applied   $app"
+      (( applied += 1 ))
+    else
+      print -ru2 -- "failed    $app"
+      (( failed += 1 ))
+    fi
+  done <"$REGISTRY"
+
+  (( applied )) && refresh_dock
+  print -- "\n$applied applied, $skipped skipped, $failed failed"
+  (( failed == 0 ))
+}
+
+cmd_help() {
+  case ${1-} in
+    "") usage ;;
+    set|restore|list|sync) usage_$1 ;;
+    *) die "unknown command: $1" ;;
+  esac
+}
+
+main() {
+  local cmd=${1-}
+  (( $# )) && shift
+  case $cmd in
+    set|restore|list|sync|help) cmd_$cmd "$@" ;;
+    -h|--help) usage ;;
+    -v|--version) print -- "$PROG $VERSION" ;;
+    "") usage >&2; exit 1 ;;
+    *) print -u2 -- "$PROG: unknown command: $cmd"; usage >&2; exit 1 ;;
+  esac
+}
+
+main "$@"
