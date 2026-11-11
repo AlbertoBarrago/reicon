@@ -14,6 +14,9 @@ set -euo pipefail
 readonly PROG=reicon
 readonly VERSION=0.1.0
 readonly ICON_FILE=$'Icon\r'
+# Inside functions $0 is the function name: resolve the script path once here.
+readonly SELF=${0:A}
+readonly APP_MANAGEMENT_URL='x-apple.systempreferences:com.apple.preference.security?Privacy_AppBundles'
 
 # Under sudo, $HOME may be root's: always work on the invoking user's home.
 if [[ -n ${SUDO_USER-} ]]; then
@@ -44,6 +47,7 @@ Usage:
 
 <app> is a path to a .app bundle or just its name (OpenIDEA, "Visual Studio Code"),
 looked up in /Applications and ~/Applications.
+Apps not owned by you (App Store, installers, other users) need sudo.
 
 Examples:
   $PROG set OpenIDEA ~/Downloads/openidea.png
@@ -58,6 +62,7 @@ Usage: $PROG set <app> <image>
 Sets <image> as the icon of <app>, refreshes Finder and the Dock, and stores a
 copy of the image so '$PROG sync' can re-apply it after the app updates.
 Use a square image, ideally 1024x1024 with the macOS icon shape already drawn.
+Apps not owned by you (App Store, installers, other users) need sudo.
 EOF
 }
 
@@ -133,7 +138,8 @@ resolve_app() {
   die "app not found in ${APP_DIRS[*]}: $arg"
 }
 
-# Prints why <app> cannot be changed and returns 1, or returns 0.
+# Prints why <app> cannot be changed and returns non-zero, or returns 0.
+# Return codes: 1 = never changeable (system app), 2 = changeable with sudo.
 check_writable() {
   local app=$1
   if [[ $app == /System/* ]]; then
@@ -141,10 +147,41 @@ check_writable() {
     return 1
   fi
   if [[ ! -w $app ]]; then
-    warn "no write access to $app (owned by $(stat -f %Su "$app")). Run it again with sudo."
-    return 1
+    warn "no write access to $app (owned by $(stat -f %Su "$app"))."
+    return 2
   fi
   return 0
+}
+
+# Prints the current command line prefixed with sudo, quoted so it can be pasted
+# as is. Uses the bare name only when it resolves to this script on the PATH.
+sudo_command() {
+  local cmd=$SELF
+  [[ ${commands[$PROG]:A} == "$cmd" ]] && cmd=$PROG
+  print -r -- "sudo ${(q-)cmd} ${(j: :)${(q-)ORIG_ARGS[@]}}"
+}
+
+# Explains that sudo is needed and shows the exact command to run. Many users
+# never read the README, so in an interactive terminal it also offers to re-run
+# the command with sudo right away; scripts and pipes only get the hint.
+offer_sudo() {
+  warn "apps not owned by you (App Store, installers, other users) need admin rights. Run:"
+  print -lru2 -- "" "    $(sudo_command)" ""
+  (( EUID != 0 )) && [[ -t 0 && -t 2 ]] || return 0
+  local answer
+  read -r "answer?Run it now with sudo? [y/N] " || return 0
+  # Absolute path: sudo may reset PATH and lose ~/.local/bin.
+  [[ $answer == [yY]* ]] && exec sudo -- "$SELF" "${ORIG_ARGS[@]}"
+  return 0
+}
+
+# Exits unless <app> can be changed, offering sudo when that would fix it.
+require_writable() {
+  local rc=0
+  check_writable "$1" || rc=$?
+  (( rc == 0 )) && return 0
+  (( rc == 2 )) && offer_sudo
+  exit 1
 }
 
 has_custom_icon() {
@@ -154,9 +191,10 @@ has_custom_icon() {
 # Calls NSWorkspace.setIcon(_:forFile:options:). An empty image path clears the
 # custom icon. Throwing inside JXA makes osascript exit non-zero; its message is
 # printed without the "execution error: Error:" prefix and "(-2700)" code it adds.
+# Returns 0 on success, 1 on error, 3 when macOS blocked the write (App Management).
 apply_icon() {
-  local app=$1 image=$2 err
-  err=$(osascript -l JavaScript - "$app" "$image" 2>&1 >/dev/null <<'JXA'
+  local app=$1 image=$2 out
+  out=$(osascript -l JavaScript - "$app" "$image" 2>&1 <<'JXA'
 ObjC.import('AppKit');
 function run(argv) {
   const [app, imagePath] = argv;
@@ -165,15 +203,60 @@ function run(argv) {
     image = $.NSImage.alloc.initWithContentsOfFile(imagePath);
     if (image.isNil()) throw new Error('cannot read image: ' + imagePath);
   }
-  if (!$.NSWorkspace.sharedWorkspace.setIconForFileOptions(image, app, 0)) {
-    throw new Error('macOS refused to change the icon of ' + app +
-      '. If the app is not yours, allow your terminal in System Settings > Privacy & Security > App Management.');
-  }
+  return $.NSWorkspace.sharedWorkspace.setIconForFileOptions(image, app, 0) ? 'ok' : 'refused';
 }
 JXA
-  ) && return 0
-  warn "$(print -r -- "$err" | sed -E 's/^execution error: (Error: )*//; s/ \(-?[0-9]+\)$//')"
-  return 1
+  ) || {
+    warn "$(print -r -- "$out" | sed -E 's/^execution error: (Error: )*//; s/ \(-?[0-9]+\)$//')"
+    return 1
+  }
+  [[ $out == ok ]] || return 3
+  # setIcon can report success without touching a protected bundle: trust the
+  # file on disk, not the return value.
+  if [[ -n $image ]]; then
+    has_custom_icon "$app" || return 3
+  else
+    ! has_custom_icon "$app" || return 3
+  fi
+  return 0
+}
+
+# Prints the terminal app that needs App Management. TERM_PROGRAM is the only
+# portable hint (sudo usually drops it, hence the generic fallback).
+terminal_name() {
+  case ${TERM_PROGRAM-} in
+    "") print -r -- "your terminal" ;;
+    Apple_Terminal) print -r -- '"Terminal"' ;;
+    *) print -r -- "\"${TERM_PROGRAM%.app}\"" ;;
+  esac
+}
+
+# App Management is a TCC permission checked on the terminal hosting reicon,
+# even for root: sudo cannot replace it. Explains that and, in an interactive
+# terminal, offers to open the right Settings pane.
+offer_app_management() {
+  warn "macOS blocked the change to $1."
+  warn "allow $(terminal_name) in System Settings > Privacy & Security > App Management,"
+  warn "then quit and reopen it. sudo does not bypass this."
+  [[ -t 0 && -t 2 ]] || return 0
+  local answer
+  read -r "answer?Open the settings now? [y/N] " || return 0
+  [[ $answer == [yY]* ]] || return 0
+  # Under sudo, open as the invoking user: root has no GUI session to show it in.
+  if [[ -n ${SUDO_USER-} ]]; then
+    sudo -u "$SUDO_USER" open "$APP_MANAGEMENT_URL"
+  else
+    open "$APP_MANAGEMENT_URL"
+  fi
+}
+
+# Applies <image> to <app> or exits, guiding the user when macOS blocked it.
+require_applied() {
+  local rc=0
+  apply_icon "$1" "$2" || rc=$?
+  (( rc == 0 )) && return 0
+  (( rc == 3 )) && offer_app_management "$1"
+  exit 1
 }
 
 # Finder caches icons per bundle: bumping the mtime invalidates that cache.
@@ -219,9 +302,9 @@ cmd_set() {
   app=$(resolve_app "$1")
   image=${2:A}
   [[ -f $image ]] || die "image not found: $2"
-  check_writable "$app" || exit 1
+  require_writable "$app"
 
-  apply_icon "$app" "$image" || exit 1
+  require_applied "$app" "$image"
   touch_app "$app"
   refresh_dock
 
@@ -241,9 +324,9 @@ cmd_restore() {
   (( $# == 1 )) || { usage_restore >&2; exit 1; }
   local app previous
   app=$(resolve_app "$1")
-  check_writable "$app" || exit 1
+  require_writable "$app"
 
-  apply_icon "$app" "" || exit 1
+  require_applied "$app" ""
   touch_app "$app"
   refresh_dock
 
@@ -295,7 +378,7 @@ cmd_sync() {
   [[ -s $REGISTRY ]] || { print -- "No icons managed by $PROG yet."; return; }
 
   # One failing app must not stop the others: count it and exit non-zero at the end.
-  local app image applied=0 skipped=0 failed=0
+  local app image rc applied=0 skipped=0 failed=0 needs_sudo=0 blocked=0
   while IFS=$'\t' read -r app image; do
     if [[ ! -d $app ]]; then
       print -r -- "skip      $app (not installed)"
@@ -305,18 +388,34 @@ cmd_sync() {
     elif [[ ! -f $image ]]; then
       print -ru2 -- "failed    $app (stored image $image is gone, run '$PROG set' again)"
       (( failed += 1 ))
-    elif check_writable "$app" && apply_icon "$app" "$image"; then
-      touch_app "$app"
-      print -r -- "applied   $app"
-      (( applied += 1 ))
     else
-      print -ru2 -- "failed    $app"
-      (( failed += 1 ))
+      rc=0
+      check_writable "$app" || rc=$?
+      (( rc == 0 )) && { apply_icon "$app" "$image" || rc=$?; }
+      if (( rc == 0 )); then
+        touch_app "$app"
+        print -r -- "applied   $app"
+        (( applied += 1 ))
+      else
+        (( rc == 2 )) && needs_sudo=1
+        (( rc == 3 )) && blocked=1
+        print -ru2 -- "failed    $app"
+        (( failed += 1 ))
+      fi
     fi
   done <"$REGISTRY"
 
   (( applied )) && refresh_dock
   print -- "\n$applied applied, $skipped skipped, $failed failed"
+  # No prompt here: sync often runs unattended, and one hint covers every app.
+  if (( needs_sudo )); then
+    warn "some apps are not owned by you and need admin rights. Run:"
+    print -lru2 -- "" "    $(sudo_command)"
+  fi
+  if (( blocked )); then
+    warn "macOS blocked some changes: allow $(terminal_name) in System Settings >"
+    warn "Privacy & Security > App Management, then quit and reopen it. sudo does not bypass this."
+  fi
   (( failed == 0 ))
 }
 
@@ -339,5 +438,8 @@ main() {
     *) print -u2 -- "$PROG: unknown command: $cmd"; usage >&2; exit 1 ;;
   esac
 }
+
+# Kept for offer_sudo/sudo_command, which rebuild the command line.
+typeset -ra ORIG_ARGS=("$@")
 
 main "$@"

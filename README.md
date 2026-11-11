@@ -56,9 +56,14 @@ at about 824x824 in the middle (the standard macOS icon grid), leaving room for 
 - **App updates** replace the app bundle and drop the custom icon. Run `reicon sync`
   afterwards (or `reicon list` to see which apps need it).
 - **Permissions.** Apps you installed by dragging them into `/Applications` usually belong
-  to you and need nothing else. Apps owned by root (App Store, installers) need `sudo`.
-  If macOS still refuses, allow your terminal in System Settings > Privacy & Security >
-  App Management.
+  to you and need nothing else. Apps owned by root (App Store, installers) or by another
+  user need `sudo`: `reicon` prints the exact command to run and, in a terminal, offers to
+  re-run it with `sudo` for you.
+- **App Management.** macOS can block changes to other apps' bundles until your terminal
+  is allowed in System Settings > Privacy & Security > App Management (quit and reopen the
+  terminal afterwards). This is checked on the terminal, not the user, so `sudo` does not
+  bypass it. `reicon` checks the bundle after each change, tells you when this happens and
+  offers to open that Settings pane.
 - **System apps** in `/System/Applications` live on a read-only volume and cannot be changed.
 - **Where data lives.** The registry and the copies of your images are in
   `~/.config/reicon` (or `$XDG_CONFIG_HOME/reicon`).
