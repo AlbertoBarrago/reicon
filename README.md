@@ -1,0 +1,70 @@
+# reicon
+
+Custom icons for macOS apps, from the terminal. One zsh script, no dependencies.
+
+```sh
+reicon set OpenIDEA ~/Downloads/openidea.png
+```
+
+reicon uses the same mechanism as pasting an image into Finder's "Get Info" window
+(`NSWorkspace.setIcon`), so the app itself is not modified beyond its custom icon and its
+code signature stays valid. Unlike Finder, it remembers the icons you set and puts them
+back after an app update with one command.
+
+## Install
+
+```sh
+git clone https://github.com/AlbertoBarrago/reicon.git
+cd reicon
+./install.sh
+```
+
+`install.sh` links `reicon` into `~/.local/bin` and tells you if that folder is not in
+your `PATH`. Remove the link with `./install.sh --uninstall`.
+
+Requirements: macOS 11 or later. No Xcode or Command Line Tools needed.
+
+## Usage
+
+| Command | What it does |
+| --- | --- |
+| `reicon set <app> <image>` | Sets the icon and remembers it for `sync` |
+| `reicon restore <app>` | Restores the original icon and forgets it |
+| `reicon list` | Shows managed icons and their state |
+| `reicon sync` | Re-applies icons dropped by app updates |
+| `reicon help [command]` | General or per-command help |
+
+`<app>` is a path to a `.app` bundle or just its name (`OpenIDEA`, `"Visual Studio Code"`),
+looked up in `/Applications` and `~/Applications`. Images can be PNG, JPEG, ICNS or SVG.
+
+`reicon list` reports each managed icon as:
+
+- `ok`: the custom icon is in place
+- `needs sync`: the app was updated and lost its icon, run `reicon sync`
+- `app missing`: the app is no longer installed
+
+## Preparing an icon
+
+macOS does not reshape custom icons: the image is shown as it is. For an icon that sits
+well in the Dock, use a 1024x1024 image with transparent corners and the body drawn
+at about 824x824 in the middle (the standard macOS icon grid), leaving room for a soft shadow.
+
+[`icons/openidea.svg`](icons/openidea.svg) is an example built on that grid.
+
+## Notes
+
+- **App updates** replace the app bundle and drop the custom icon. Run `reicon sync`
+  afterwards (or `reicon list` to see which apps need it).
+- **Permissions.** Apps you installed by dragging them into `/Applications` usually belong
+  to you and need nothing else. Apps owned by root (App Store, installers) need `sudo`.
+  If macOS still refuses, allow your terminal in System Settings > Privacy & Security >
+  App Management.
+- **System apps** in `/System/Applications` live on a read-only volume and cannot be changed.
+- **Where data lives.** The registry and the copies of your images are in
+  `~/.config/reicon` (or `$XDG_CONFIG_HOME/reicon`).
+
+## License
+
+MIT, see [LICENSE](LICENSE). The example icon in `icons/` is a reworked version of the
+[OpenIDEA](https://github.com/l0ng-ai/openidea) logo (Apache-2.0); the original mark
+belongs to its authors. reicon is not affiliated with OpenIDEA.
