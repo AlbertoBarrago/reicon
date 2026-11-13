@@ -58,6 +58,8 @@ at about 824x824 in the middle (the standard macOS icon grid), leaving room for 
 
 - **App updates** replace the app bundle and drop the custom icon. Run `reicon sync`
   afterwards (or `reicon list` to see which apps need it).
+- **Running apps** keep the icon they loaded at launch, so their Dock tile changes only
+  after you relaunch them. `reicon` tells you when the app is running.
 - **Permissions.** Apps you installed by dragging them into `/Applications` usually belong
   to you and need nothing else. Apps owned by root (App Store, installers) or by another
   user need `sudo`: `reicon` prints the exact command to run and, in a terminal, offers to

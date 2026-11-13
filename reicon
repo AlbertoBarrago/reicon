@@ -284,6 +284,23 @@ refresh_dock() {
   warn "could not restart the Dock, it may keep showing the old icon. Run: killall Dock"
 }
 
+# A running app keeps the icon it loaded at launch and the Dock shows that one,
+# so restarting the Dock is not enough. ps reports full executable paths on
+# macOS; matching the main executable under Contents/MacOS skips helpers, and
+# a glob with the quoted path avoids escaping regex metacharacters.
+app_running() {
+  local exe
+  for exe in "${(@f)$(ps -axo comm=)}"; do
+    [[ $exe == "$1"/Contents/MacOS/* ]] && return 0
+  done
+  return 1
+}
+
+hint_relaunch() {
+  app_running "$1" || return 0
+  warn "${1:t:r} is running: relaunch it to see the new icon in the Dock"
+}
+
 bundle_id() {
   /usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$1/Contents/Info.plist" 2>/dev/null \
     || print -r -- ${1:t:r}
@@ -333,6 +350,7 @@ cmd_set() {
   fix_owner
 
   print -r -- "Set ${image:t} as the icon of ${app:t}"
+  hint_relaunch "$app"
 }
 
 cmd_restore() {
@@ -353,6 +371,7 @@ cmd_restore() {
   fi
 
   print -r -- "Restored the original icon of ${app:t}"
+  hint_relaunch "$app"
 }
 
 cmd_list() {
@@ -427,6 +446,7 @@ cmd_sync() {
       if (( rc == 0 )); then
         touch_app "$app"
         print -r -- "applied   $app"
+        hint_relaunch "$app"
         (( applied += 1 ))
       else
         (( rc == 2 )) && needs_sudo=1
