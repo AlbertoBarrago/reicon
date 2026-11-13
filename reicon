@@ -19,8 +19,10 @@ readonly SELF=${0:A}
 readonly APP_MANAGEMENT_URL='x-apple.systempreferences:com.apple.preference.security?Privacy_AppBundles'
 
 # Under sudo, $HOME may be root's: always work on the invoking user's home.
+# Tilde expansion goes through getpwnam, which sees Directory Services users;
+# $userdirs only lists /etc/passwd, where macOS keeps no regular accounts.
 if [[ -n ${SUDO_USER-} ]]; then
-  readonly USER_HOME=${userdirs[$SUDO_USER]}
+  readonly USER_HOME=~$SUDO_USER
 else
   readonly USER_HOME=$HOME
 fi
