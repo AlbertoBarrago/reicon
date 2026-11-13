@@ -43,6 +43,9 @@ looked up in `/Applications` and `~/Applications`. Images can be PNG, JPEG, ICNS
 - `needs sync`: the app was updated and lost its icon, run `reicon sync`
 - `app missing`: the app is no longer installed
 
+Next to the state, each app shows the name to pass to `reicon restore` (quoted when it has
+spaces, `-` when the app is missing), followed by its path.
+
 ## Preparing an icon
 
 macOS does not reshape custom icons: the image is shown as it is. For an icon that sits
