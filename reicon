@@ -264,9 +264,12 @@ touch_app() {
   touch "$1"
 }
 
-# The Dock keeps its own icon cache, reloaded only on restart.
+# The Dock keeps its own icon cache, reloaded only on restart. A failed restart
+# is not fatal (the icon is already set), but it leaves the Dock showing the
+# old icon, so say so instead of failing silently.
 refresh_dock() {
-  killall Dock 2>/dev/null || true
+  killall Dock 2>/dev/null && return 0
+  warn "could not restart the Dock, it may keep showing the old icon. Run: killall Dock"
 }
 
 bundle_id() {
