@@ -85,6 +85,7 @@ Shows the icons managed by $PROG with their state:
   needs sync    the app was updated and lost its icon: run '$PROG sync'
   app missing   the app is no longer installed
 and the apps in ${APP_DIRS[*]} with a custom icon set outside $PROG.
+Each app is shown with the name to pass to '$PROG restore' and its path.
 EOF
 }
 
@@ -138,6 +139,15 @@ resolve_app() {
     [[ -d $dir/$name.app ]] && { print -r -- ${${:-$dir/$name.app}:A}; return; }
   done
   die "app not found in ${APP_DIRS[*]}: $arg"
+}
+
+# Prints the shortest argument that resolve_app maps back to <app>, quoted for
+# the shell: the bare name when the lookup finds this very bundle, the full
+# path otherwise (outside APP_DIRS or shadowed by a same-named app).
+app_ref() {
+  local app=$1 name=${1:t:r} ref=$1
+  [[ $(resolve_app "$name" 2>/dev/null) == "${app:A}" ]] && ref=$name
+  print -r -- ${(q-)ref}
 }
 
 # Prints why <app> cannot be changed and returns non-zero, or returns 0.
@@ -348,32 +358,49 @@ cmd_restore() {
 cmd_list() {
   (( $# == 0 )) || { usage_list >&2; exit 1; }
   local -A managed
-  local app image state
+  local -a states=() refs=() apps=() others=() other_refs=()
+  local app image state ref width=0
 
+  # Rows are collected first so the ref column can be sized to its widest entry.
   if [[ -s $REGISTRY ]]; then
-    print -- "Managed by $PROG:"
     while IFS=$'\t' read -r app image; do
       managed[$app]=1
+      # A missing app has no argument 'restore' would accept: show a placeholder.
+      ref=-
       if [[ ! -d $app ]]; then state="app missing"
-      elif has_custom_icon "$app"; then state="ok"
-      else state="needs sync"
+      elif has_custom_icon "$app"; then state="ok"; ref=$(app_ref "$app")
+      else state="needs sync"; ref=$(app_ref "$app")
       fi
-      printf '  %-12s %s\n' "$state" "$app"
+      states+=("$state") apps+=("$app") refs+=("$ref")
       # Older entries may differ in case from the real path: match both forms.
       managed[${app:A}]=1
     done <"$REGISTRY"
+  fi
+  for app in ${^APP_DIRS}/*.app(N); do
+    (( ${+managed[$app]} )) && continue
+    has_custom_icon "$app" && others+=("$app") other_refs+=("$(app_ref "$app")")
+  done
+  for ref in "${refs[@]}" "${other_refs[@]}"; do
+    (( ${#ref} > width )) && width=${#ref}
+  done
+
+  local i
+  if (( ${#apps} )); then
+    print -- "Managed by $PROG:"
+    for i in {1..${#apps}}; do
+      printf '  %-12s %-*s  %s\n' "${states[i]}" $width "${refs[i]}" "${apps[i]}"
+    done
   else
     print -- "No icons managed by $PROG yet."
   fi
-
-  local -a others=()
-  for app in ${^APP_DIRS}/*.app(N); do
-    (( ${+managed[$app]} )) && continue
-    has_custom_icon "$app" && others+=("$app")
-  done
   if (( ${#others} )); then
     print -- "\nCustom icon set outside $PROG:"
-    printf '  %s\n' "${others[@]}"
+    for i in {1..${#others}}; do
+      printf '  %-*s  %s\n' $width "${other_refs[i]}" "${others[i]}"
+    done
+  fi
+  if (( ${#apps} + ${#others} )); then
+    print -- "\nRestore the original icon with: $PROG restore <name>"
   fi
   return 0
 }
