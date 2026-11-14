@@ -52,7 +52,9 @@ macOS does not reshape custom icons: the image is shown as it is. For an icon th
 well in the Dock, use a 1024x1024 image with transparent corners and the body drawn
 at about 824x824 in the middle (the standard macOS icon grid), leaving room for a soft shadow.
 
-[`icons/openidea.svg`](icons/openidea.svg) is an example built on that grid.
+[`icons/openidea.svg`](icons/openidea.svg) and [`icons/rex-albz.svg`](icons/rex-albz.svg) are
+examples built on that grid. SVG text is not guaranteed to render through `NSImage`, so for
+icons with lettering pass a rendered PNG (each example ships one next to its SVG).
 
 ## Notes
 
@@ -75,6 +77,10 @@ at about 824x824 in the middle (the standard macOS icon grid), leaving room for 
 
 ## License
 
-MIT, see [LICENSE](LICENSE). The example icon in `icons/` is a reworked version of the
-[OpenIDEA](https://github.com/l0ng-ai/openidea) logo (Apache-2.0); the original mark
-belongs to its authors. reicon is not affiliated with OpenIDEA.
+MIT, see [LICENSE](LICENSE). The example icons in `icons/` are reworked versions of
+third-party marks, which belong to their authors:
+
+- `openidea.*`: the [OpenIDEA](https://github.com/l0ng-ai/openidea) logo (Apache-2.0)
+- `rex-albz.*`: a personal, hand-redrawn take on the Rex app icon
+
+reicon is not affiliated with OpenIDEA or Rex.
